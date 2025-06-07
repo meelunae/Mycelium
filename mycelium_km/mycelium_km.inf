@@ -1,0 +1,62 @@
+;
+; mycelium_km.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System ; TODO: specify appropriate Class
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318} ; TODO: specify appropriate ClassGuid
+Provider    = %ManufacturerName%
+CatalogFile = mycelium_km.cat
+DriverVer   = 2025-05-20; TODO: set DriverVer in stampinf property pages
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+mycelium_km.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NT$ARCH$.10.0...16299]
+%mycelium_km.DeviceDesc% = mycelium_km_Device, Root\mycelium_km ; TODO: edit hw-id
+
+[mycelium_km_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+mycelium_km.sys
+
+;-------------- Service installation
+[mycelium_km_Device.NT.Services]
+AddService = mycelium_km,%SPSVCINST_ASSOCSERVICE%, mycelium_km_Service_Inst
+
+; -------------- mycelium_km driver install sections
+[mycelium_km_Service_Inst]
+DisplayName    = %mycelium_km.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\mycelium_km.sys
+
+[mycelium_km_Device.NT.Wdf]
+KmdfService = mycelium_km, mycelium_km_wdfsect
+
+[mycelium_km_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+DiskName = "mycelium_km Installation Disk"
+mycelium_km.DeviceDesc = "mycelium_km Device"
+mycelium_km.SVCDESC = "mycelium_km Service"
