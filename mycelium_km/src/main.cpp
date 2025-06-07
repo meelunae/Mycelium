@@ -3,7 +3,7 @@
 #include <ntstrsafe.h>
 
 void debug_print(PCSTR text) {
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "%s\n", text);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "%s", text);
 }
 
 VOID ProcessNotifyCallback(
@@ -53,6 +53,7 @@ typedef struct _LOG_ENTRY {
 LOG_ENTRY LogBuffer[MAX_LOG_ENTRIES];
 ULONG LogIndex = 0;
 KSPIN_LOCK LogSpinLock;
+KSPIN_LOCK RegistrySpinLock;
 
 #define IOCTL_GET_LOG_ENTRY CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_GET_PROCESS_CONTEXT CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -112,15 +113,6 @@ const WCHAR* IgnoredRegistryPaths[] = {
 #define EVENT_REGISTRY_SET      7
 #define EVENT_REGISTRY_DELETE   8
 #define EVENT_PROCESS_INJECTION 9
-#define EVENT_SUSPICIOUS_ACTIVITY 10
-#define EVENT_RANSOMWARE_ACTIVITY 11
-
-// Logging modes
-#define LOG_MODE_ALL 0           
-#define LOG_MODE_SUSPICIOUS 1    
-#define LOG_MODE_CRITICAL 2      
-
-ULONG CurrentLogMode = LOG_MODE_SUSPICIOUS;
 
 // Rate limiting for registry events
 #define MAX_REGISTRY_EVENTS_PER_SECOND 10
@@ -275,20 +267,23 @@ PWCHAR SafeWcsstrI(PCWSTR haystack, PCWSTR needle)
 // Registry rate limiting
 BOOLEAN ShouldLogRegistryEvent()
 {
+    KIRQL oldIrql;
     LARGE_INTEGER currentTime;
     KeQuerySystemTime(&currentTime);
+    KeAcquireSpinLock(&RegistrySpinLock, &oldIrql);
 
-    // Reset counter every second
-    if ((currentTime.QuadPart - LastRegistryReset.QuadPart) > 10000000LL) { // 1 second in 100ns units
+    if ((currentTime.QuadPart - LastRegistryReset.QuadPart) > 10000000LL) {
         RegistryEventCount = 0;
         LastRegistryReset = currentTime;
     }
 
     if (RegistryEventCount >= MAX_REGISTRY_EVENTS_PER_SECOND) {
+        KeReleaseSpinLock(&RegistrySpinLock, oldIrql);
         return FALSE;
     }
 
     RegistryEventCount++;
+    KeReleaseSpinLock(&RegistrySpinLock, oldIrql);
     return TRUE;
 }
 
@@ -341,7 +336,11 @@ VOID ThreadNotifyCallback(
                 AddLogEntry(EVENT_THREAD_CREATE, pid, tid, NULL, NULL, NULL);
             }
             else {
-                AddLogEntry(EVENT_THREAD_TERMINATE, pid, tid, NULL, NULL, NULL);
+                PPROCESS_CONTEXT ctx = GetOrCreateProcessContext(pid, 0);
+                if (ctx && ctx->IsTracked) {
+                    AddLogEntry(EVENT_THREAD_TERMINATE, pid, tid, NULL, NULL, NULL);
+
+                }
             }
         }
     }
@@ -452,10 +451,7 @@ NTSTATUS RegistryCallback(
         }
 
         case RegNtPreDeleteKey:
-            // Only log registry deletions if suspicious or in ALL mode AND from tracked process
-            if (CurrentLogMode == LOG_MODE_ALL) {
                 AddLogEntry(EVENT_REGISTRY_DELETE, pid, 0, NULL, NULL, NULL);
-            }
             break;
 
         default:
@@ -474,44 +470,41 @@ VOID AddLogEntry(ULONG EventType, ULONG ProcessId, ULONG ThreadId,
     PCUNICODE_STRING ImagePath, PCUNICODE_STRING CommandLine,
     PCUNICODE_STRING RegistryPath)
 {
-    KIRQL oldIrql;
-    PLOG_ENTRY entry;
+    PPROCESS_CONTEXT ctx = NULL;
+    ctx = GetOrCreateProcessContext(ProcessId, 0);
+    if (ctx && ctx->IsTracked) {
 
-    if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
-        return;
-    }
+        KIRQL oldIrql;
+        PLOG_ENTRY entry;
 
-    KeAcquireSpinLock(&LogSpinLock, &oldIrql);
-
-    __try {
-        entry = &LogBuffer[LogIndex % MAX_LOG_ENTRIES];
-        LogIndex++;
-
-        RtlZeroMemory(entry, sizeof(LOG_ENTRY));
-
-        KeQuerySystemTime(&entry->Timestamp);
-        entry->EventType = EventType;
-        entry->ProcessId = ProcessId;
-        entry->ThreadId = ThreadId;
-
-        PPROCESS_CONTEXT ctx = NULL;
-        if (ProcessId != 0) {
-            ctx = GetOrCreateProcessContext(ProcessId, 0);
-            if (ctx) {
-                entry->ParentProcessId = ctx->ParentProcessId;
-            }
+        if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
+            return;
         }
 
-        // Safe string copying
-        SafeUnicodeStringCopy(entry->ImagePath, sizeof(entry->ImagePath), ImagePath);
-        SafeUnicodeStringCopy(entry->CommandLine, sizeof(entry->CommandLine), CommandLine);
-        SafeUnicodeStringCopy(entry->RegistryPath, sizeof(entry->RegistryPath), RegistryPath);
+        KeAcquireSpinLock(&LogSpinLock, &oldIrql);
 
-        // Debug output based on logging mode and conditions
-        BOOLEAN shouldPrintDebug =
-            (CurrentLogMode == LOG_MODE_ALL);
+        __try {
+            entry = &LogBuffer[LogIndex % MAX_LOG_ENTRIES];
+            LogIndex++;
 
-        if (shouldPrintDebug) {
+            RtlZeroMemory(entry, sizeof(LOG_ENTRY));
+
+            KeQuerySystemTime(&entry->Timestamp);
+            entry->EventType = EventType;
+            entry->ProcessId = ProcessId;
+            entry->ThreadId = ThreadId;
+
+            if (ProcessId != 0) {
+                if (ctx) {
+                    entry->ParentProcessId = ctx->ParentProcessId;
+                }
+            }
+
+            // Safe string copying
+            SafeUnicodeStringCopy(entry->ImagePath, sizeof(entry->ImagePath), ImagePath);
+            SafeUnicodeStringCopy(entry->CommandLine, sizeof(entry->CommandLine), CommandLine);
+            SafeUnicodeStringCopy(entry->RegistryPath, sizeof(entry->RegistryPath), RegistryPath);
+
             char debugBuffer[512];
             const char* eventTypeStr = "UNKNOWN";
             const char* prefix = "[EVENT-";
@@ -550,12 +543,12 @@ VOID AddLogEntry(ULONG EventType, ULONG ProcessId, ULONG ThreadId,
                 debug_print(debugBuffer);
             }
         }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Silently handle exceptions
-    }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Silently handle exceptions
+        }
 
-    KeReleaseSpinLock(&LogSpinLock, oldIrql);
+        KeReleaseSpinLock(&LogSpinLock, oldIrql);
+    }
 }
 
 PPROCESS_CONTEXT GetOrCreateProcessContext(ULONG ProcessId, ULONG ParentProcessId)
@@ -653,7 +646,7 @@ VOID ProcessNotifyCallback(
             if (!TrackingEnabled) {
                 PCUNICODE_STRING imageName = CreateInfo->ImageFileName;
                 UNICODE_STRING targetName;
-                RtlInitUnicodeString(&targetName, L"notepad.exe");
+                RtlInitUnicodeString(&targetName, L"sample.exe");
                 // Get pointer to filename part by scanning backward for '\\'
                 USHORT len = imageName->Length / sizeof(WCHAR);
                 WCHAR* buffer = imageName->Buffer;
@@ -740,7 +733,7 @@ VOID ProcessNotifyCallback(
                 const char* prefix = "[PROCESS_TERMINATE]";
 
                 RtlStringCbPrintfA(logBuffer, sizeof(logBuffer),
-                    "%s PID: %lu",
+                    "%s PID: %lu\n",
                     prefix, pid);
                 debug_print(logBuffer);
             }
@@ -869,7 +862,7 @@ NTSTATUS DriverEntry(
     }
 
     debug_print("[+] All notification callbacks registered successfully!\n");
-    debug_print("[+] Driver loaded successfully");
+    debug_print("[+] Driver loaded successfully\n");
 
     return status;
 }
