@@ -30,12 +30,10 @@ NTSTATUS RegistryCallback(
     PVOID Argument2
 );
 
-// Handle for registry callback
 LARGE_INTEGER RegCookie = { 0 };
 
 
 
-// Custom logging structure
 typedef struct _LOG_ENTRY {
     LARGE_INTEGER Timestamp;
     ULONG EventType;
@@ -48,7 +46,6 @@ typedef struct _LOG_ENTRY {
     UCHAR Encrypted;
 } LOG_ENTRY, * PLOG_ENTRY;
 
-// Circular buffer for logs
 #define MAX_LOG_ENTRIES 1000
 LOG_ENTRY LogBuffer[MAX_LOG_ENTRIES];
 ULONG LogIndex = 0;
@@ -62,7 +59,6 @@ KSPIN_LOCK RegistrySpinLock;
 ULONG TargetRootProcId = 0;
 BOOLEAN TrackingEnabled = false;
 
-// Process context tracking
 typedef struct _PROCESS_CONTEXT {
     ULONG ProcessId;
     ULONG ParentProcessId;
@@ -102,8 +98,10 @@ const WCHAR* IgnoredRegistryPaths[] = {
     L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class"
 };
 #define IGNORED_REG_COUNT (sizeof(IgnoredRegistryPaths) / sizeof(WCHAR*))
+#define MAX_REGISTRY_EVENTS_PER_SECOND 10
+ULONG RegistryEventCount = 0;
+LARGE_INTEGER LastRegistryReset = { 0 };
 
-// Event types
 #define EVENT_PROCESS_CREATE    1
 #define EVENT_PROCESS_TERMINATE 2
 #define EVENT_THREAD_CREATE     3
@@ -114,10 +112,6 @@ const WCHAR* IgnoredRegistryPaths[] = {
 #define EVENT_REGISTRY_DELETE   8
 #define EVENT_PROCESS_INJECTION 9
 
-// Rate limiting for registry events
-#define MAX_REGISTRY_EVENTS_PER_SECOND 10
-ULONG RegistryEventCount = 0;
-LARGE_INTEGER LastRegistryReset = { 0 };
 
 // Function prototypes
 VOID AddLogEntry(ULONG EventType, ULONG ProcessId, ULONG ThreadId,
@@ -127,6 +121,8 @@ BOOLEAN IsProcessTrusted(PCUNICODE_STRING ImagePath);
 PPROCESS_CONTEXT GetOrCreateProcessContext(ULONG ProcessId, ULONG ParentProcessId);
 BOOLEAN IsRegistryPathIgnored(PCUNICODE_STRING RegistryPath);
 BOOLEAN ShouldLogRegistryEvent();
+NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath);
+VOID MyceliumUnload(_In_ PDRIVER_OBJECT DriverObject);
 
 
 NTSTATUS create(PDEVICE_OBJECT device_object, PIRP irp) {
@@ -178,7 +174,6 @@ NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
             break;
         }
 
-        // Search backwards through the log buffer for tracked process entries
         BOOLEAN foundTrackedEntry = FALSE;
         ULONG searchIndex = LogIndex;
 
@@ -186,15 +181,12 @@ NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
             searchIndex--;
             PLOG_ENTRY currentEntry = &LogBuffer[searchIndex % MAX_LOG_ENTRIES];
 
-            // Check if this log entry is from a tracked process
             if (currentEntry->ProcessId != 0) {
                 PPROCESS_CONTEXT ctx = GetOrCreateProcessContext(currentEntry->ProcessId, 0);
                 if (ctx && ctx->IsTracked) {
-                    // Found a tracked entry, copy it to user buffer
                     *userBuffer = *currentEntry;
                     foundTrackedEntry = TRUE;
 
-                    // Remove this entry by shifting remaining entries
                     for (ULONG i = searchIndex; i < LogIndex - 1; i++) {
                         LogBuffer[i % MAX_LOG_ENTRIES] = LogBuffer[(i + 1) % MAX_LOG_ENTRIES];
                     }
@@ -202,13 +194,10 @@ NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
                 }
             }
             else {
-                // For registry events or other events without ProcessId, 
-                // we can still return them if tracking is enabled
                 if (TrackingEnabled) {
                     *userBuffer = *currentEntry;
                     foundTrackedEntry = TRUE;
 
-                    // Remove this entry by shifting remaining entries
                     for (ULONG i = searchIndex; i < LogIndex - 1; i++) {
                         LogBuffer[i % MAX_LOG_ENTRIES] = LogBuffer[(i + 1) % MAX_LOG_ENTRIES];
                     }
@@ -240,7 +229,6 @@ NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
     return status;
 }
 
-// Safe case-insensitive string search
 PWCHAR SafeWcsstrI(PCWSTR haystack, PCWSTR needle)
 {
     if (!haystack || !needle) return NULL;
@@ -264,7 +252,6 @@ PWCHAR SafeWcsstrI(PCWSTR haystack, PCWSTR needle)
     return NULL;
 }
 
-// Registry rate limiting
 BOOLEAN ShouldLogRegistryEvent()
 {
     KIRQL oldIrql;
@@ -287,7 +274,6 @@ BOOLEAN ShouldLogRegistryEvent()
     return TRUE;
 }
 
-// Check if registry path should be ignored
 BOOLEAN IsRegistryPathIgnored(PCUNICODE_STRING RegistryPath)
 {
     if (!RegistryPath || !RegistryPath->Buffer || RegistryPath->Length == 0) {
@@ -316,7 +302,6 @@ BOOLEAN ShouldLogEvent(ULONG ProcessId) {
     return FALSE;
 }
 
-// Thread creation/termination callback
 VOID ThreadNotifyCallback(
     HANDLE ProcessId,
     HANDLE ThreadId,
@@ -349,7 +334,6 @@ VOID ThreadNotifyCallback(
     }
 }
 
-// Image load callback
 VOID ImageLoadNotifyCallback(
     PUNICODE_STRING FullImageName,
     HANDLE ProcessId,
@@ -376,7 +360,6 @@ VOID ImageLoadNotifyCallback(
     }
 }
 
-// Safe string copy function
 VOID SafeUnicodeStringCopy(PWCHAR Destination, SIZE_T DestinationSize, PCUNICODE_STRING Source)
 {
     if (!Destination || !Source || !Source->Buffer || DestinationSize == 0) {
@@ -396,7 +379,6 @@ VOID SafeUnicodeStringCopy(PWCHAR Destination, SIZE_T DestinationSize, PCUNICODE
     }
 }
 
-// Registry operation callback - FIXED with rate limiting and filtering
 NTSTATUS RegistryCallback(
     PVOID CallbackContext,
     PVOID Argument1,
@@ -409,7 +391,6 @@ NTSTATUS RegistryCallback(
         return STATUS_SUCCESS;
     }
 
-    // Rate limiting check
     if (!ShouldLogRegistryEvent()) {
         return STATUS_SUCCESS;
     }
@@ -417,11 +398,9 @@ NTSTATUS RegistryCallback(
     __try {
         REG_NOTIFY_CLASS notifyClass = (REG_NOTIFY_CLASS)(ULONG_PTR)Argument1;
 
-        // Get current process ID to check if it's tracked
         HANDLE currentProcessId = PsGetCurrentProcessId();
         ULONG pid = HandleToUlong(currentProcessId);
 
-        // Only log registry events from tracked processes
         if (!ShouldLogEvent(pid)) {
             return STATUS_SUCCESS;
         }
@@ -430,7 +409,6 @@ NTSTATUS RegistryCallback(
         case RegNtPreCreateKeyEx: {
             PREG_CREATE_KEY_INFORMATION createInfo = (PREG_CREATE_KEY_INFORMATION)Argument2;
             if (createInfo && createInfo->CompleteName) {
-                // Skip ignored registry paths
                 if (IsRegistryPathIgnored(createInfo->CompleteName)) {
                     return STATUS_SUCCESS;
                 }
@@ -465,7 +443,6 @@ NTSTATUS RegistryCallback(
     return STATUS_SUCCESS;
 }
 
-// Add log entry function - IMPROVED with better filtering
 VOID AddLogEntry(ULONG EventType, ULONG ProcessId, ULONG ThreadId,
     PCUNICODE_STRING ImagePath, PCUNICODE_STRING CommandLine,
     PCUNICODE_STRING RegistryPath)
@@ -500,7 +477,6 @@ VOID AddLogEntry(ULONG EventType, ULONG ProcessId, ULONG ThreadId,
                 }
             }
 
-            // Safe string copying
             SafeUnicodeStringCopy(entry->ImagePath, sizeof(entry->ImagePath), ImagePath);
             SafeUnicodeStringCopy(entry->CommandLine, sizeof(entry->CommandLine), CommandLine);
             SafeUnicodeStringCopy(entry->RegistryPath, sizeof(entry->RegistryPath), RegistryPath);
@@ -561,7 +537,6 @@ PPROCESS_CONTEXT GetOrCreateProcessContext(ULONG ProcessId, ULONG ParentProcessI
     KeAcquireSpinLock(&ProcessContextLock, &oldIrql);
 
     __try {
-        // First try to find existing context
         for (ULONG i = 0; i < MAX_TRACKED_PROCESSES; i++) {
             if (ProcessContexts[i].InUse && ProcessContexts[i].ProcessId == ProcessId) {
                 ctx = &ProcessContexts[i];
@@ -569,7 +544,6 @@ PPROCESS_CONTEXT GetOrCreateProcessContext(ULONG ProcessId, ULONG ParentProcessI
             }
         }
 
-        // If not found, create new one
         if (!ctx) {
             ctx = &ProcessContexts[ProcessContextIndex % MAX_TRACKED_PROCESSES];
             ProcessContextIndex++;
@@ -589,7 +563,6 @@ PPROCESS_CONTEXT GetOrCreateProcessContext(ULONG ProcessId, ULONG ParentProcessI
     return ctx;
 }
 
-// Check if process is trusted - OPTIMIZED
 BOOLEAN IsProcessTrusted(PCUNICODE_STRING ImagePath)
 {
     if (!ImagePath || !ImagePath->Buffer || ImagePath->Length == 0) {
@@ -605,7 +578,6 @@ BOOLEAN IsProcessTrusted(PCUNICODE_STRING ImagePath)
             filename = ImagePath->Buffer;
         }
 
-        // Simple case-insensitive comparison
         for (ULONG i = 0; i < TRUSTED_PROCESS_COUNT; i++) {
             if (_wcsicmp(filename, TrustedProcesses[i]) == 0) {
                 return TRUE;
@@ -619,11 +591,6 @@ BOOLEAN IsProcessTrusted(PCUNICODE_STRING ImagePath)
     return FALSE;
 }
 
-// Forward declarations
-NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath);
-VOID MyceliumUnload(_In_ PDRIVER_OBJECT DriverObject);
-
-// Process notification callback implementation - ENHANCED
 VOID ProcessNotifyCallback(
     PEPROCESS Process,
     HANDLE ProcessId,
@@ -638,7 +605,6 @@ VOID ProcessNotifyCallback(
 
     __try {
         if (CreateInfo) {
-            // Process creation
             ULONG pid = HandleToUlong(ProcessId);
             ULONG parentPid = CreateInfo->ParentProcessId ? HandleToUlong(CreateInfo->ParentProcessId) : 0;
 
@@ -665,7 +631,6 @@ VOID ProcessNotifyCallback(
                 baseName.Length = (USHORT)((len - i) * sizeof(WCHAR));
                 baseName.MaximumLength = baseName.Length;
 
-                // Compare case-insensitive
                 if (RtlEqualUnicodeString(&baseName, &targetName, TRUE)) {
                     char cpybuf[256];
                     sprintf(cpybuf, "Target process '%wZ' detected. PID: %lu\n", imageName, pid);
@@ -692,7 +657,6 @@ VOID ProcessNotifyCallback(
                 }
             }
 
-            // Log based on current mode
             if (ShouldLogEvent(pid)) {
                 char logBuffer[512];
                 const char* prefix = "[PROCESS_CREATE]";
@@ -702,14 +666,12 @@ VOID ProcessNotifyCallback(
                     prefix, pid, parentPid);
                 debug_print(logBuffer);
 
-                // Log image path if available
                 if (CreateInfo->ImageFileName && CreateInfo->ImageFileName->Buffer) {
                     RtlStringCbPrintfA(logBuffer, sizeof(logBuffer),
                         "[INFO] Image: %wZ\n", CreateInfo->ImageFileName);
                     debug_print(logBuffer);
                 }
 
-                // Log command line if available
                 if (CreateInfo->CommandLine && CreateInfo->CommandLine->Buffer) {
                     RtlStringCbPrintfA(logBuffer, sizeof(logBuffer),
                         "[INFO] CommandLine: %wZ\n", CreateInfo->CommandLine);
@@ -717,15 +679,12 @@ VOID ProcessNotifyCallback(
                 }
             }
 
-            // Always add to internal log buffer (regardless of logging mode)
             AddLogEntry(EVENT_PROCESS_CREATE, pid, 0, CreateInfo->ImageFileName,
                 CreateInfo->CommandLine, NULL);
         }
         else {
             // Process termination
             ULONG pid = HandleToUlong(ProcessId);
-
-            // Log termination based on logging mode
             BOOLEAN shouldLog = ShouldLogEvent(pid);
 
             if (shouldLog) {
@@ -738,7 +697,6 @@ VOID ProcessNotifyCallback(
                 debug_print(logBuffer);
             }
 
-            // Always add to internal log buffer
             AddLogEntry(EVENT_PROCESS_TERMINATE, pid, 0, NULL, NULL, NULL);
         }
     }
@@ -768,7 +726,6 @@ VOID MyceliumUnload(_In_ PDRIVER_OBJECT DriverObject)
     debug_print("[+] Driver unloaded and cleaned up.\n");
 }
 
-// Enhanced DriverEntry
 NTSTATUS DriverEntry(
     _In_ PDRIVER_OBJECT DriverObject,
     _In_ PUNICODE_STRING RegistryPath
@@ -787,10 +744,8 @@ NTSTATUS DriverEntry(
     LogIndex = 0;
     ProcessContextIndex = 0;
 
-    // Set unload routine
     DriverObject->DriverUnload = MyceliumUnload;
 
-    // Your existing device creation code
     UNICODE_STRING device_name = {};
     PDEVICE_OBJECT device_object = NULL;
     RtlInitUnicodeString(&device_name, L"\\Device\\Mycelium");
@@ -804,7 +759,6 @@ NTSTATUS DriverEntry(
     }
     debug_print("[+] Created device driver successfully!\n");
 
-    // Your existing symbolic link creation
     UNICODE_STRING symbolic_link = {};
     RtlInitUnicodeString(&symbolic_link, L"\\DosDevices\\Mycelium");
     status = IoCreateSymbolicLink(&symbolic_link, &device_name);

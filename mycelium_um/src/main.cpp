@@ -13,7 +13,6 @@
 using json = nlohmann::json;
 const wchar_t* DLL_PATH = L"C:\\Spore.dll";
 
-// ------------ Structs ------------
 struct MalwareExecutionParams {
     std::wstring malwarePath;
     int executionTime;
@@ -30,6 +29,8 @@ struct LOG_ENTRY {
     WCHAR RegistryPath[260];
     UCHAR Encrypted;
 };
+
+// ------------ Utilities ------------
 
 std::wstring ConvertTimestampToString(const LARGE_INTEGER& timestamp) {
     FILETIME ft;
@@ -54,7 +55,6 @@ std::wstring ConvertTimestampToString(const LARGE_INTEGER& timestamp) {
     return L"<invalid time>";
 }
 
-// ------------ Utility ------------
 std::wstring utf8_to_wstring(const std::string& str) {
     if (str.empty()) return L"";
     int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0);
@@ -178,48 +178,6 @@ void MonitorKernelLogs() {
     CloseHandle(hDevice);
 }
 
-void ListenToMyceliumPipe() {
-    HANDLE hPipe = CreateNamedPipeW(
-        L"\\\\.\\pipe\\MyceliumPipe",          
-        PIPE_ACCESS_INBOUND,                  
-        PIPE_TYPE_BYTE | PIPE_WAIT,           
-        1,                                    
-        4096, 4096,                           
-        0,                                    
-        nullptr                               
-    );
-
-    if (hPipe == INVALID_HANDLE_VALUE) {
-        std::wcerr << L"[!] Failed to create named pipe: " << GetLastError() << std::endl;
-        return;
-    }
-
-    std::wcout << L"[+] Waiting for Spore.dll to connect to pipe..." << std::endl;
-    if (!ConnectNamedPipe(hPipe, nullptr)) {
-        std::wcerr << L"[!] Failed to connect named pipe: " << GetLastError() << std::endl;
-        CloseHandle(hPipe);
-        return;
-    }
-
-    std::wcout << L"[+] Spore.dll connected to MyceliumPipe.\n" << std::endl;
-
-    char buffer[512];
-    DWORD bytesRead;
-
-    while (true) {
-        BOOL success = ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr);
-        if (!success || bytesRead == 0)
-            break;
-
-        buffer[bytesRead] = '\0';
-        std::cout << buffer;
-    }
-
-    std::wcout << L"[!] Pipe disconnected.\n";
-    CloseHandle(hPipe);
-}
-
-
 // ------------ Config Loader ------------
 void LoadConfigAndExecute(const std::string& configFilePath) {
     std::ifstream configFile(configFilePath);
@@ -254,21 +212,16 @@ void LoadConfigAndExecute(const std::string& configFilePath) {
 
 // ------------ Main ------------
 int main() {
-    std::string configPath = "config.json";
+    std::string configPath = "D:\\config.json";
 
     // Start kernel monitoring in background
     std::thread monitorThread(MonitorKernelLogs);
-
-    // Start hook DLL logging in background
-    std::thread hookLogThread(ListenToMyceliumPipe);
-
 
     // Start malware execution from config
     LoadConfigAndExecute(configPath);
 
     std::cout << "[*] All tasks started. Press Ctrl+C to stop." << std::endl;
     monitorThread.join();
-    hookLogThread.join();
 
     return 0;
 }

@@ -3,4 +3,5 @@ Debug
 Release
 .DS_Store
 .env
+.vs
 
