@@ -76,6 +76,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IntDir>$(SolutionDir)build\dll_intermediates</IntDir>
+    <OutDir>$(SolutionDir)build\</OutDir>
   </PropertyGroup>
   <!-- DEBUG WIN32 BUILD SETTINGS -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">

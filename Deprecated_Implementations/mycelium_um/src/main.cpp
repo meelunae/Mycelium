@@ -30,6 +30,23 @@ struct LOG_ENTRY {
     UCHAR Encrypted;
 };
 
+// ------------ Global Logging ------------
+std::wofstream g_logFile;
+void InitLogging() {
+    g_logFile.open(L"C:\\MyceliumLogs\\service.log", std::ios::app);
+}
+void Log(const std::wstring& message) {
+    if (g_logFile.is_open()) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        g_logFile << L"[" << st.wHour << L":" << st.wMinute << L":" << st.wSecond << L"] " << message << std::endl;
+        g_logFile.flush();
+    }
+}
+void CloseLogging() {
+    if (g_logFile.is_open()) g_logFile.close();
+}
+
 // ------------ Utilities ------------
 
 std::wstring ConvertTimestampToString(const LARGE_INTEGER& timestamp) {
@@ -65,10 +82,10 @@ std::wstring utf8_to_wstring(const std::string& str) {
 
 bool CopyToKnownPath(const std::wstring& sourcePath, const std::wstring& targetPath) {
     if (!CopyFileW(sourcePath.c_str(), targetPath.c_str(), FALSE)) {
-        std::wcerr << L"[!] Copy failed: " << GetLastError() << std::endl;
+        Log(L"[!] Copy failed: " + std::to_wstring(GetLastError()));
         return false;
     }
-    std::wcout << L"[+] Copied malware to known path." << std::endl;
+    Log(L"[+] Copied malware to known path.");
     return true;
 }
 
@@ -118,15 +135,15 @@ DWORD WINAPI MalwareExecutionThread(LPVOID lpParameter) {
 
     if (!CreateProcessW(params->malwarePath.c_str(), nullptr, nullptr, nullptr, FALSE,
         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        std::wcerr << L"[!] Failed to launch malware: " << GetLastError() << std::endl;
+        Log(L"[!] Failed to launch malware: " + std::to_wstring(GetLastError()));
         delete params;
         return 1;
     }
 
-    std::wcout << L"[+] Malware running (PID: " << pi.dwProcessId << L")" << std::endl;
+    Log(L"[+] Malware running (PID: " + std::to_wstring(pi.dwProcessId) + L")");
 
     if (!InjectDLL(pi.hProcess, DLL_PATH)) {
-        std::wcerr << L"[!] Injection failed. Terminating process." << std::endl;
+        Log(L"[!] Injection failed. Terminating process.");
         TerminateProcess(pi.hProcess, 1);
     }
 
@@ -143,7 +160,7 @@ DWORD WINAPI MalwareExecutionThread(LPVOID lpParameter) {
 void MonitorKernelLogs() {
     HANDLE hDevice = CreateFileW(L"\\\\.\\Mycelium", GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (hDevice == INVALID_HANDLE_VALUE) {
-        std::wcerr << L"[!] Failed to open device. Error: " << GetLastError() << std::endl;
+        Log(L"[!] Failed to open device. Error: " + std::to_wstring(GetLastError()));
         return;
     }
 
@@ -151,7 +168,7 @@ void MonitorKernelLogs() {
     LOG_ENTRY logEntry;
     DWORD bytesReturned;
 
-    std::wcout << L"[*] Monitoring kernel logs..." << std::endl;
+    Log(L"[*] Monitoring kernel logs...");
 
     while (true) {
         BOOL success = DeviceIoControl(hDevice, IOCTL_GET_LOG_ENTRY, nullptr, 0,
@@ -161,16 +178,17 @@ void MonitorKernelLogs() {
             continue;
         }
 
-        std::wcout << L"[" << ConvertTimestampToString(logEntry.Timestamp) << L"] | PID: "
-            << logEntry.ProcessId << L" | " << logEntry.EventType
-            << L" | Image: " << logEntry.ImagePath << std::endl;
+        std::wstring msg = L"[" + ConvertTimestampToString(logEntry.Timestamp) + L"] | PID: " +
+            std::to_wstring(logEntry.ProcessId) + L" | " + std::to_wstring(logEntry.EventType) +
+            L" | Image: " + logEntry.ImagePath;
+        Log(msg);
 
         if (injectedPIDs.insert(logEntry.ProcessId).second) {
             if (InjectDLL(logEntry.ProcessId, DLL_PATH)) {
-                std::wcout << L"[*] DLL injected into PID " << logEntry.ProcessId << std::endl;
+                Log(L"[*] DLL injected into PID " + std::to_wstring(logEntry.ProcessId));
             }
             else {
-                std::wcerr << L"[!] Injection failed for PID " << logEntry.ProcessId << std::endl;
+                Log(L"[!] Injection failed for PID " + std::to_wstring(logEntry.ProcessId));
             }
         }
     }
@@ -179,10 +197,10 @@ void MonitorKernelLogs() {
 }
 
 // ------------ Config Loader ------------
-void LoadConfigAndExecute(const std::string& configFilePath) {
+void LoadConfigAndExecute(const std::wstring& configFilePath) {
     std::ifstream configFile(configFilePath);
     if (!configFile) {
-        std::cerr << "[!] Failed to open config: " << configFilePath << std::endl;
+        Log(L"[!] Failed to open config: " + configFilePath);
         return;
     }
 
@@ -191,7 +209,8 @@ void LoadConfigAndExecute(const std::string& configFilePath) {
         configFile >> configJson;
     }
     catch (const std::exception& e) {
-        std::cerr << "[!] Invalid JSON config: " << e.what() << std::endl;
+        Log(L"[!] Invalid JSON config.");
+        return;
     }
 
     for (const auto& entry : configJson) {
@@ -210,9 +229,47 @@ void LoadConfigAndExecute(const std::string& configFilePath) {
     }
 }
 
-// ------------ Main ------------
-int main() {
-    std::string configPath = "D:\\config.json";
+SERVICE_STATUS_HANDLE gStatusHandle = nullptr;
+SERVICE_STATUS gServiceStatus = {0};
+
+void SetStatus(DWORD state) {
+    gServiceStatus.dwCurrentState = state;
+    gServiceStatus.dwControlsAccepted = 0;
+    gServiceStatus.dwWin32ExitCode = 0;
+    gServiceStatus.dwServiceSpecificExitCode = 0;
+    gServiceStatus.dwCheckPoint = 0;
+    gServiceStatus.dwWaitHint = 0;
+    gServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+
+    SetServiceStatus(gStatusHandle, &gServiceStatus);
+}
+
+void WINAPI ServiceMain(DWORD argc, LPWSTR* argv) {
+    gStatusHandle = RegisterServiceCtrlHandlerW(L"MyceliumMonitor", nullptr);
+    if (!gStatusHandle) return;
+
+    SetStatus(SERVICE_START_PENDING);
+
+    std::wstring configPath = L"D:\\config.json";
+
+    // Start kernel monitoring in background
+    std::thread monitorThread(MonitorKernelLogs);
+
+    // Start malware execution from config
+    LoadConfigAndExecute(configPath);
+
+    SetStatus(SERVICE_RUNNING);
+
+    // Keep the service alive
+    while (true) {
+        Sleep(1000);
+    }
+}
+
+void RunAsConsole() {
+    std::wcout << L"[i] Running in console mode...\n";
+
+    std::wstring configPath = L"D:\\config.json";
 
     // Start kernel monitoring in background
     std::thread monitorThread(MonitorKernelLogs);
@@ -222,6 +279,23 @@ int main() {
 
     std::cout << "[*] All tasks started. Press Ctrl+C to stop." << std::endl;
     monitorThread.join();
+    
+    std::wcout << L"[i] Press Ctrl+C to exit\n";
+    while (true) {
+        Sleep(1000);
+    }
+}
+
+int wmain(int argc, wchar_t* argv[]) {
+    SERVICE_TABLE_ENTRYW ServiceTable[] = {
+        { (LPWSTR)L"MyceliumMonitor", (LPSERVICE_MAIN_FUNCTIONW)ServiceMain },
+        { nullptr, nullptr }
+    };
+
+    if (!StartServiceCtrlDispatcherW(ServiceTable)) {
+        // Not launched as a service, fallback to console mode
+        RunAsConsole();
+    }
 
     return 0;
 }
