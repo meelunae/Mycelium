@@ -8,7 +8,7 @@ from datetime import datetime
 
 TARGET = r"C:\sample.exe"
 HOOK_SCRIPT_PATH = "hooks.js"
-LOG_DIR = "logs/session.json"
+LOG_DIR = "logs"
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -28,9 +28,9 @@ class FridaInstrument(threading.Thread):
         print(f"[Frida] [{event['timestamp']}] {event['type']}: {json.dumps(event, indent=2)}")
 
     def save_logs(self):
-        with open(log_file, "w", encoding="utf-8") as f:
+        with open(self.log_file, "w", encoding="utf-8") as f:
             json.dump(self.events, f, indent=2)
-        print(f"[Frida] [+] Saved logs to {log_file}")
+        print(f"[Frida] [+] Saved logs to {self.log_file}")
 
     def on_message(self, message, data):
         if message["type"] == "send":
